@@ -3,7 +3,25 @@ from dgl.nn.pytorch import GraphConv
 import dgl
 import torch
 
+class GCNNodeCora(torch.nn.Module):
+    def __init__(self, in_feats, hidden_size, num_classes, device='cpu'):
+        super(GCNNodeCora, self).__init__()
+        self.device = device
+        self.conv1 = GraphConv(in_feats, hidden_size)
+        self.conv2 = GraphConv(hidden_size, num_classes)
 
+    def forward(self, g, features, edge_weight=None, target_nodes=None):
+        # First layer of GCN
+        h = F.relu(self.conv1(g, features))
+        
+        # Second layer of GCN
+        logits = self.conv2(g, h)
+        
+        # If target nodes are specified, return their logits
+        if target_nodes is not None:
+            return logits[target_nodes]
+        
+        return logits
 # class GCNGraphNew(torch.nn.Module):
 #     def __init__(self, in_feats, h_feats):
 #         super(GCNGraphNew, self).__init__()

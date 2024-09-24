@@ -3,6 +3,8 @@ import torch
 import os
 import time
 from pathlib import Path
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from models.gcn import GCNNodeBAShapes
 from utils.argument import arg_parse_train_node_ba_shapes
 from utils.graph_init import graph_init_real

@@ -1,5 +1,5 @@
 import numpy as np
-
+from dgl.data import CoraGraphDataset
 
 def graph_init_real(dataset):
     if dataset == "Mutagenicity_0":
@@ -17,6 +17,10 @@ def graph_init_real(dataset):
     elif dataset == "citeseer":
         from utils.preprocessing.citeseer_preprocessing import citeseer_preprocessing
         G_dataset = citeseer_preprocessing(dataset_dir="datasets/citeseer")
+    elif dataset == "Cora":
+        # Load the Cora dataset using DGL
+        dataset = CoraGraphDataset()
+        G_dataset = dataset[0]  # Get the graph object
     else:
         print('Error: Dataset not known.')
         exit(2)

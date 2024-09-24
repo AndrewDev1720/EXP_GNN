@@ -75,7 +75,7 @@ class GraphExplainerEdge(torch.nn.Module):
             optimizer.step()
 
         masked_adj = explainer.get_masked_adj()
-        masked_adj = explainer.get_masked_adj()
+        # masked_adj = explainer.get_masked_adj()
         new_edge_num = len(masked_adj[masked_adj > self.args.mask_thresh])
         exp_num = new_edge_num / 2
         return masked_adj, exp_num
@@ -216,8 +216,8 @@ class NodeExplainerEdgeMulti(torch.nn.Module):
         super(NodeExplainerEdgeMulti, self).__init__()
         self.base_model = base_model
         self.base_model.eval()
-        self.G_dataset = G_dataset
-        self.test_indices = test_indices
+        self.G_dataset = G_dataset  # This is now a single graph
+        self.test_indices = test_indices  # Node indices to explain
         self.args = args
         if fix_exp:
             self.fix_exp = fix_exp * 2
@@ -225,68 +225,62 @@ class NodeExplainerEdgeMulti(torch.nn.Module):
             self.fix_exp = None
 
     def explain_nodes_gnn_stats(self):
-        exp_dict = {}  # {'gid': masked_adj, 'gid': mask_adj}
-        num_dict = {}  # {'gid': exp_num, 'gid': exp_num}
+        exp_dict = {}  # {'node_id': masked_adj, ...}
+        num_dict = {}  # {'node_id': exp_num, ...}
         pred_label_dict = {}
-        t_gid = []
-        for gid in tqdm.tqdm(self.test_indices):
-            ori_pred = self.base_model(self.G_dataset.graphs[gid],
-                                       self.G_dataset.graphs[gid].ndata['feat'].float(),
-                                       self.G_dataset.graphs[gid].edata['weight'], self.G_dataset.targets[gid])[0]
+        t_nodes = []  # List of node IDs to explain
+        
+        for node_id in tqdm.tqdm(self.test_indices):
+            ori_pred = self.base_model(self.G_dataset, 
+                                       self.G_dataset.ndata['feat'].float(),
+                                       self.G_dataset.edata['eweight'])[node_id]
             ori_pred_label = torch.argmax(ori_pred)
-            if self.args.dataset == 'citeseer':
-                ori_label = self.G_dataset.labels[gid]
-            else:
-                ori_label = torch.argmax(self.G_dataset.labels[gid])
-            if self.args.dataset == 'citeseer' or (ori_pred_label != 0 and ori_label != 0):
-                t_gid.append(gid)
-                masked_adj, exp_num = self.explain(gid, ori_pred_label)
-                exp_dict[gid] = masked_adj
-                num_dict[gid] = exp_num
-                pred_label_dict[gid] = ori_pred_label
-        print('average number of exps:', sum(num_dict.values()) / len(num_dict.keys()))
+
+            ori_label = self.G_dataset.ndata['label'][node_id]
+
+            # For Cora, we can focus on non-zero classes or specific explanations
+            if ori_pred_label != 0 and ori_label != 0:  
+                t_nodes.append(node_id)
+                masked_adj, exp_num = self.explain(node_id, ori_pred_label)
+                exp_dict[node_id] = masked_adj
+                num_dict[node_id] = exp_num
+                pred_label_dict[node_id] = ori_pred_label
+
+        print('Average number of explanations:', sum(num_dict.values()) / len(num_dict.keys()))
 
         PN = self.compute_pn(exp_dict, pred_label_dict)
         PS = self.compute_ps(exp_dict, pred_label_dict)
-        if self.args.dataset == 'citeseer':
-            acc = -1
-            pre = -1
-            rec = -1
-            f1 = -1
-        else:
-            acc, pre, rec, f1 = self.compute_precision_recall(exp_dict)
-        print('PN', PN)
-        print('PS', PS)
-        print('PNS', 2 * PN * PS / (PN + PS))
-        print('ave exp', sum(num_dict.values()) / len(num_dict.keys()))
-        print('acc: ', acc, ' pre: ', pre, ' rec: ', rec, ' f1: ', f1)
+        acc, pre, rec, f1 = self.compute_precision_recall(exp_dict)
+        print('PN:', PN)
+        print('PS:', PS)
+        print('FNS:', 2 * PN * PS / (PN + PS))
+        print('Acc:', acc, ' Precision:', pre, ' Recall:', rec, ' F1:', f1)
         return PN, PS, 2 * PN * PS / (PN + PS), sum(num_dict.values()) / len(num_dict.keys()), acc, pre, rec, f1
 
-    def explain(self, gid, pred_label):
+    def explain(self, node_id, ori_pred_label):
         explainer = ExplainModelNodeMulti(
-            graph=self.G_dataset.graphs[gid],
+            graph=self.G_dataset,  # Now using the entire graph
             base_model=self.base_model,
-            target_node=self.G_dataset.targets[gid],
+            target_node=node_id,  # Explain this specific node
             args=self.args
         )
         if self.args.gpu:
             explainer = explainer.cuda()
+
         optimizer = torch.optim.Adam(explainer.parameters(), lr=self.args.lr, weight_decay=0)
         explainer.train()
+
         for epoch in range(self.args.num_epochs):
             explainer.zero_grad()
             pred1, pred2 = explainer()
-            bpr1, bpr2, l1, loss = explainer.loss(
-                pred1[0], pred2[0], pred_label, self.args.gam, self.args.lam, self.args.alp)
 
-            # if epoch % 201 == 0:
-            #     print('bpr1: ', self.args.lam * self.args.alp * bpr1,
-            #           'bpr2:', self.args.lam * (1 - self.args.alp) * bpr2,
-            #           'l1', l1,
-            #           'loss', loss)
+            bpr1, bpr2, l1, loss = explainer.loss(
+                pred1[node_id], pred2[node_id], ori_pred_label, self.args.gam, self.args.lam, self.args.alp
+            )
+
             loss.backward()
             optimizer.step()
-        
+
         masked_adj = explainer.get_masked_adj()
         new_edge_num = len(masked_adj[masked_adj > self.args.mask_thresh])
         exp_num = new_edge_num / 2
@@ -294,44 +288,44 @@ class NodeExplainerEdgeMulti(torch.nn.Module):
 
     def compute_pn(self, exp_dict, pred_label_dict):
         pn_count = 0
-        for gid, masked_adj in exp_dict.items():
-            graph = self.G_dataset.graphs[gid]
-            target = self.G_dataset.targets[gid]
-            ori_pred_label = pred_label_dict[gid]
+        for node_id, masked_adj in exp_dict.items():
+            graph = self.G_dataset
+            ori_pred_label = pred_label_dict[node_id]
+            
             if self.fix_exp:
-                if self.fix_exp > (len(masked_adj.flatten()) - 1):
-                    thresh = masked_adj.flatten().sort(descending=True)[0][len(masked_adj.flatten()) - 1]
-                else:
-                    thresh = masked_adj.flatten().sort(descending=True)[0][self.fix_exp + 1]
+                thresh = masked_adj.flatten().sort(descending=True)[0][self.fix_exp+1]
             else:
                 thresh = self.args.mask_thresh
+                
             ps_adj = (masked_adj > thresh).float()
-            pn_adj = graph.edata['weight'] - ps_adj
-            new_pre = self.base_model(graph, graph.ndata['feat'].float(), pn_adj, target)[0]
+            pn_adj = graph.edata['eweight'] - ps_adj
+            new_pre = self.base_model(graph, graph.ndata['feat'].float(), pn_adj)[node_id]
             new_label = torch.argmax(new_pre)
+            
             if new_label != ori_pred_label:
                 pn_count += 1
+
         pn = pn_count / len(exp_dict.keys())
         return pn
 
     def compute_ps(self, exp_dict, pred_label_dict):
         ps_count = 0
-        for gid, masked_adj in exp_dict.items():
-            graph = self.G_dataset.graphs[gid]
-            target = self.G_dataset.targets[gid]
-            ori_pred_label = pred_label_dict[gid]
+        for node_id, masked_adj in exp_dict.items():
+            graph = self.G_dataset
+            ori_pred_label = pred_label_dict[node_id]
+
             if self.fix_exp:
-                if self.fix_exp > (len(masked_adj.flatten()) - 1):
-                    thresh = masked_adj.flatten().sort(descending=True)[0][len(masked_adj.flatten()) - 1]
-                else:
-                    thresh = masked_adj.flatten().sort(descending=True)[0][self.fix_exp + 1]
+                thresh = masked_adj.flatten().sort(descending=True)[0][self.fix_exp+1]
             else:
                 thresh = self.args.mask_thresh
+
             ps_adj = (masked_adj > thresh).float()
-            new_pre = self.base_model(graph, graph.ndata['feat'].float(), ps_adj, target)[0]
+            new_pre = self.base_model(graph, graph.ndata['feat'].float(), ps_adj)[node_id]
             new_label = torch.argmax(new_pre)
+            
             if new_label == ori_pred_label:
                 ps_count += 1
+
         ps = ps_count / len(exp_dict.keys())
         return ps
 
@@ -341,52 +335,55 @@ class NodeExplainerEdgeMulti(torch.nn.Module):
         f1s = []
         accs = []
 
-        for gid, masked_adj in exp_dict.items():
+        # Use node labels (G_dataset.ndata['label']) for node classification task
+        for node_id, masked_adj in exp_dict.items():
             if self.fix_exp:
-                if self.fix_exp > (len(masked_adj.flatten()) - 1):
-                    thresh = masked_adj.flatten().sort(descending=True)[0][len(masked_adj.flatten()) - 1]
-                else:
-                    thresh = masked_adj.flatten().sort(descending=True)[0][self.fix_exp + 1]
+                thresh = masked_adj.flatten().sort(descending=True)[0][self.fix_exp + 1]
             else:
                 thresh = self.args.mask_thresh
-            e_labels = self.G_dataset[gid][0].edata['gt']
-            new_edges = [masked_adj > thresh][0].numpy()
-            old_edges = [self.G_dataset[gid][0].edata['weight'] > thresh][0].numpy()
-            int_map = map(int, new_edges)
-            new_edges = list(int_map)
-            int_map = map(int, old_edges)
-            old_edges = list(int_map)
-            exp_list = np.array(new_edges)
-            TP = 0
-            FP = 0
-            TN = 0
-            FN = 0
-            for i in range(len(e_labels)):
-                if exp_list[i] == 1:
-                    if e_labels[i] == 1:
-                        TP += 1
-                    else:
-                        FP += 1
-                else:
-                    if e_labels[i] == 1:
-                        FN += 1
-                    else:
-                        TN += 1
-            # print('TP', TP, 'FP', FP, 'TN', TN, 'FN', FN)
-            if TP != 0:
+
+            # Use node-level labels for precision and recall
+            pred_label = self.base_model(self.G_dataset, self.G_dataset.ndata['feat'], masked_adj)[node_id]
+            true_label = self.G_dataset.ndata['label'][node_id]
+
+            # Convert logits to predicted labels
+            pred_label = torch.argmax(pred_label).item()
+            true_label = true_label.item()
+
+            # Calculate precision, recall, accuracy, and F1 score
+            if pred_label == true_label:
+                TP = 1
+                FN = 0
+                FP = 0
+            else:
+                TP = 0
+                FN = 1
+                FP = 1
+
+            if TP + FP > 0:
                 pre = TP / (TP + FP)
+            else:
+                pre = 0.0
+
+            if TP + FN > 0:
                 rec = TP / (TP + FN)
-                acc = (TP + TN) / (TP + FP + TN + FN)
+            else:
+                rec = 0.0
+
+            if pre + rec > 0:
                 f1 = 2 * pre * rec / (pre + rec)
             else:
-                pre = 0
-                rec = 0
-                f1 = 0
-                acc = (TP + TN) / (TP + FP + TN + FN)
+                f1 = 0.0
+
+            acc = TP / (TP + FN)  # Accuracy for this node
+
+            # Store the metrics
             pres.append(pre)
             recalls.append(rec)
             f1s.append(f1)
             accs.append(acc)
+
+        # Return the average of all metrics across nodes
         return np.mean(accs), np.mean(pres), np.mean(recalls), np.mean(f1s)
 
                 
@@ -439,12 +436,20 @@ class ExplainModelNodeMulti(torch.nn.Module):
         return mask
 
     def get_masked_adj(self):
+        # Apply sigmoid to the adjacency mask (which is node-to-node)
         sym_mask = torch.sigmoid(self.adj_mask)
-        sym_mask = (sym_mask + sym_mask.t()) / 2
+        
+        # We need to apply the mask on the actual edges of the graph, not all node pairs
+        g = self.graph  # The graph object
+        edge_index = g.edges()  # Edge indices in (source, destination) format
+        
+        # Create edge mask using the source-destination pairs from edge_index
+        edge_mask = sym_mask[edge_index[0], edge_index[1]]
+        
+        # Multiply edge weights by the mask
         adj = self.graph.edata['weight']
-        flatten_sym_mask = torch.reshape(sym_mask, (-1, ))
-        masked_adj = adj * flatten_sym_mask
-        ''
+        masked_adj = adj * edge_mask  # Apply mask to the actual edge weights
+        
         return masked_adj
 
 
