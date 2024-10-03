@@ -230,20 +230,20 @@ class NodeExplainerEdgeMulti(torch.nn.Module):
         pred_label_dict = {}
         t_nodes = []  # List of node IDs to explain
         
-        for node_id in tqdm.tqdm(self.test_indices):
+        for node_id in tqdm.tqdm(self.test_indices[:2]):  # Limiting to 10 test nodes as per your earlier request
             ori_pred = self.base_model(self.G_dataset, 
-                                       self.G_dataset.ndata['feat'].float(),
-                                       self.G_dataset.edata['eweight'])[node_id]
+                                    self.G_dataset.ndata['feat'].float(),
+                                    self.G_dataset.edata['eweight'])[node_id]
             ori_pred_label = torch.argmax(ori_pred)
 
             ori_label = self.G_dataset.ndata['label'][node_id]
 
-            # For Cora, we can focus on non-zero classes or specific explanations
+            # For Cora, focus on non-zero classes or specific explanations
             if ori_pred_label != 0 and ori_label != 0:  
                 t_nodes.append(node_id)
-                masked_adj, exp_num = self.explain(node_id, ori_pred_label)
-                exp_dict[node_id] = masked_adj
-                num_dict[node_id] = exp_num
+                masked_adj, exp_num = self.explain(node_id, ori_pred_label)  # Capture masked_adj and exp_num
+                exp_dict[node_id] = masked_adj  # Store masked_adj in the dictionary
+                num_dict[node_id] = exp_num  # Store exp_num in the dictionary
                 pred_label_dict[node_id] = ori_pred_label
 
         print('Average number of explanations:', sum(num_dict.values()) / len(num_dict.keys()))
@@ -255,7 +255,10 @@ class NodeExplainerEdgeMulti(torch.nn.Module):
         print('PS:', PS)
         print('FNS:', 2 * PN * PS / (PN + PS))
         print('Acc:', acc, ' Precision:', pre, ' Recall:', rec, ' F1:', f1)
-        return PN, PS, 2 * PN * PS / (PN + PS), sum(num_dict.values()) / len(num_dict.keys()), acc, pre, rec, f1
+
+        # Return the dictionaries containing masked_adj and exp_num
+        return exp_dict, num_dict
+
 
     def explain(self, node_id, ori_pred_label):
         explainer = ExplainModelNodeMulti(
